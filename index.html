@@ -371,10 +371,6 @@
 
   <div class="controls">
     <div class="control-group">
-      <label>Bleed Radius</label>
-      <input type="number" id="bleedRadius" value="8" min="1" max="64" title="Number of pixels to bleed outward">
-    </div>
-    <div class="control-group">
       <label>Output Format</label>
       <select id="outputFormat">
         <option value="png">PNG</option>
@@ -426,7 +422,6 @@
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
   const thumbnailsEl = document.getElementById('thumbnails');
-  const bleedRadiusInput = document.getElementById('bleedRadius');
   const outputFormatSelect = document.getElementById('outputFormat');
   const clearBtn = document.getElementById('clearBtn');
   const processBtn = document.getElementById('processBtn');
@@ -542,122 +537,122 @@
   }
 
   // --- Alpha bleed algorithm ---
-  // BFS flood-fill: propagate RGB from opaque pixels outward into transparent pixels.
-  // Each iteration layer expands one pixel outward. We repeat for `radius` layers.
+  // Based on https://github.com/urraka/alpha-bleeding
+  // BFS flood-fill that propagates RGB from opaque pixels into ALL transparent pixels.
+  // Uses bit-masking on an opaque tracking array to correctly handle wavefront expansion.
 
-  function alphaBleed(imageData, radius) {
-    const { width, height, data } = imageData;
-    const total = width * height;
+  function alphaBleed(data, width, height) {
+    const offsets = [
+      [-1, -1], [0, -1], [1, -1],
+      [-1,  0],          [1,  0],
+      [-1,  1], [0,  1], [1,  1],
+    ];
 
-    // Work on a copy so we can read original alpha
-    const rgb = new Float32Array(total * 3);
-    const alpha = new Uint8Array(total);
-    const filled = new Uint8Array(total); // 1 = has valid RGB
+    // opaque: -1 (0xFFFFFFFF) = original opaque pixel, 0 = unprocessed transparent
+    // loose: true = transparent pixel with NO opaque neighbors yet
+    const opaque = new Int32Array(width * height);
+    const loose = new Uint8Array(width * height);
+    let pending = [];
+    let pendingNext = [];
 
-    // Initialize from source
-    for (let i = 0; i < total; i++) {
-      const si = i * 4;
-      alpha[i] = data[si + 3];
-      if (data[si + 3] > 0) {
-        rgb[i * 3]     = data[si];
-        rgb[i * 3 + 1] = data[si + 1];
-        rgb[i * 3 + 2] = data[si + 2];
-        filled[i] = 1;
-      }
-    }
+    // Classify all pixels
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        const si = idx * 4;
 
-    // Offsets for 8-connected neighbors
-    const dx = [-1, 0, 1, -1, 1, -1, 0, 1];
-    const dy = [-1, -1, -1, 0, 0, 1, 1, 1];
+        if (data[si + 3] !== 0) {
+          // Opaque (or semi-transparent) — mark as source
+          opaque[idx] = -1; // all bits set
+        } else {
+          // Fully transparent — check if adjacent to any non-transparent pixel
+          let isLoose = true;
+          for (let k = 0; k < 8; k++) {
+            const nX = x + offsets[k][0];
+            const nY = y + offsets[k][1];
+            if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
+              if (data[(nY * width + nX) * 4 + 3] !== 0) {
+                isLoose = false;
+                break;
+              }
+            }
+          }
 
-    // Collect initial frontier: transparent pixels adjacent to opaque pixels
-    let frontier = [];
-    for (let i = 0; i < total; i++) {
-      if (filled[i]) continue;
-      const x = i % width;
-      const y = (i - x) / width;
-      for (let d = 0; d < 8; d++) {
-        const nx = x + dx[d];
-        const ny = y + dy[d];
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-          if (filled[ny * width + nx]) {
-            frontier.push(i);
-            break;
+          if (!isLoose) {
+            pending.push(idx);
+          } else {
+            loose[idx] = 1;
           }
         }
       }
     }
 
-    // BFS expansion
-    for (let iter = 0; iter < radius; iter++) {
-      if (frontier.length === 0) break;
+    // Iteratively expand: process pending pixels, then shift bits
+    while (pending.length > 0) {
+      pendingNext = [];
 
-      const nextFrontier = [];
-
-      for (let fi = 0; fi < frontier.length; fi++) {
-        const i = frontier[fi];
-        if (filled[i]) continue; // already processed in this iteration
-
-        const x = i % width;
-        const y = (i - x) / width;
+      for (let p = 0; p < pending.length; p++) {
+        const idx = pending[p];
+        const x = idx % width;
+        const y = (idx - x) / width;
 
         let r = 0, g = 0, b = 0, count = 0;
-        for (let d = 0; d < 8; d++) {
-          const nx = x + dx[d];
-          const ny = y + dy[d];
-          if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-            const ni = ny * width + nx;
-            if (filled[ni]) {
-              r += rgb[ni * 3];
-              g += rgb[ni * 3 + 1];
-              b += rgb[ni * 3 + 2];
+
+        for (let k = 0; k < 8; k++) {
+          const nX = x + offsets[k][0];
+          const nY = y + offsets[k][1];
+          if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
+            const nIdx = nY * width + nX;
+            // Check lowest bit — means this neighbor has valid RGB
+            if (opaque[nIdx] & 1) {
+              const nSi = nIdx * 4;
+              r += data[nSi];
+              g += data[nSi + 1];
+              b += data[nSi + 2];
               count++;
             }
           }
         }
 
         if (count > 0) {
-          rgb[i * 3]     = r / count;
-          rgb[i * 3 + 1] = g / count;
-          rgb[i * 3 + 2] = b / count;
-          filled[i] = 1;
+          const si = idx * 4;
+          data[si]     = Math.round(r / count);
+          data[si + 1] = Math.round(g / count);
+          data[si + 2] = Math.round(b / count);
+          // Keep alpha at 0
+          opaque[idx] = 0xFE;
 
-          // Add unfilled neighbors to next frontier
-          for (let d = 0; d < 8; d++) {
-            const nx = x + dx[d];
-            const ny = y + dy[d];
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-              const ni = ny * width + nx;
-              if (!filled[ni]) {
-                nextFrontier.push(ni);
+          // Promote loose neighbors to pending
+          for (let k = 0; k < 8; k++) {
+            const nX = x + offsets[k][0];
+            const nY = y + offsets[k][1];
+            if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
+              const nIdx = nY * width + nX;
+              if (loose[nIdx]) {
+                pendingNext.push(nIdx);
+                loose[nIdx] = 0;
               }
             }
           }
+        } else {
+          pendingNext.push(idx);
         }
       }
 
-      frontier = nextFrontier;
-    }
-
-    // Write result back
-    for (let i = 0; i < total; i++) {
-      const si = i * 4;
-      if (alpha[i] === 0 && filled[i]) {
-        data[si]     = Math.round(rgb[i * 3]);
-        data[si + 1] = Math.round(rgb[i * 3 + 1]);
-        data[si + 2] = Math.round(rgb[i * 3 + 2]);
-        // Keep alpha at 0
+      // Shift right so newly filled pixels (0xFE >> 1 = 0x7F) still have bit 0 set
+      if (pendingNext.length > 0) {
+        for (let p = 0; p < pending.length; p++) {
+          opaque[pending[p]] >>= 1;
+        }
       }
-    }
 
-    return imageData;
+      pending = pendingNext;
+    }
   }
 
   // --- Processing ---
 
   async function processImages() {
-    const radius = parseInt(bleedRadiusInput.value) || 8;
-
     processBtn.disabled = true;
     downloadBtn.disabled = true;
     progressContainer.classList.add('visible');
@@ -679,7 +674,7 @@
       ctx.drawImage(item.img, 0, 0);
 
       const imageData = ctx.getImageData(0, 0, item.w, item.h);
-      alphaBleed(imageData, radius);
+      alphaBleed(imageData.data, item.w, item.h);
       ctx.putImageData(imageData, 0, 0);
 
       item.fixedCanvas = canvas;
