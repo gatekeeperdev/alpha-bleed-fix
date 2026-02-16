@@ -281,7 +281,8 @@
       min-height: 150px;
     }
 
-    .preview-card-body canvas {
+    .preview-card-body canvas,
+    .preview-card-body img {
       max-width: 100%;
       height: auto;
       display: block;
@@ -370,13 +371,6 @@
   </div>
 
   <div class="controls">
-    <div class="control-group">
-      <label>Output Format</label>
-      <select id="outputFormat">
-        <option value="png">PNG</option>
-        <option value="webp">WebP</option>
-      </select>
-    </div>
     <div class="spacer"></div>
     <button class="btn btn-danger" id="clearBtn" disabled>Clear All</button>
     <button class="btn btn-primary" id="processBtn" disabled>Fix Images</button>
@@ -418,62 +412,251 @@
 </footer>
 
 <script>
-(function () {
-  const dropZone = document.getElementById('dropZone');
-  const fileInput = document.getElementById('fileInput');
-  const thumbnailsEl = document.getElementById('thumbnails');
-  const outputFormatSelect = document.getElementById('outputFormat');
-  const clearBtn = document.getElementById('clearBtn');
-  const processBtn = document.getElementById('processBtn');
-  const downloadBtn = document.getElementById('downloadBtn');
-  const progressContainer = document.getElementById('progressContainer');
-  const progressText = document.getElementById('progressText');
-  const progressPercent = document.getElementById('progressPercent');
-  const progressFill = document.getElementById('progressFill');
-  const previewSection = document.getElementById('previewSection');
-  const previewList = document.getElementById('previewList');
+// --- PNG encoder from https://github.com/wheany/js-png-encoder ---
+// Encodes raw RGBA pixel data directly to PNG, bypassing canvas export
+// which would premultiply alpha and destroy RGB on transparent pixels.
+(function (globalObj) {
+  'use strict';
+  var DEFLATE_METHOD = String.fromCharCode(0x78, 0x01),
+      CRC_TABLE = [],
+      SIGNATURE = String.fromCharCode(137, 80, 78, 71, 13, 10, 26, 10),
+      NO_FILTER = String.fromCharCode(0);
 
-  let images = []; // { name, img, w, h, originalData, fixedCanvas, processed }
+  function make_crc_table() {
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      CRC_TABLE[n] = c;
+    }
+  }
+
+  function inflateStore(data) {
+    var MAX = 65535, buf = '', i, rem, bt;
+    for (i = 0; i < data.length; i += MAX) {
+      rem = data.length - i;
+      bt = (rem <= MAX) ? String.fromCharCode(0x01) : String.fromCharCode(0x00);
+      if (rem > MAX) rem = MAX;
+      buf += bt + String.fromCharCode(rem & 0xFF, (rem & 0xFF00) >>> 8);
+      buf += String.fromCharCode((~rem) & 0xFF, ((~rem) & 0xFF00) >>> 8);
+      buf += data.substring(i, i + rem);
+    }
+    return buf;
+  }
+
+  function adler32(data) {
+    var a = 1, b = 0;
+    for (var i = 0; i < data.length; i++) {
+      a = (a + data.charCodeAt(i)) % 65521;
+      b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+  }
+
+  function update_crc(crc, buf) {
+    var c = crc;
+    for (var n = 0; n < buf.length; n++) {
+      c = CRC_TABLE[(c ^ buf.charCodeAt(n)) & 0xff] ^ (c >>> 8);
+    }
+    return c;
+  }
+
+  function crc(buf) { return update_crc(0xffffffff, buf) ^ 0xffffffff; }
+
+  function dword(d) {
+    return String.fromCharCode((d & 0xFF000000) >>> 24, (d & 0x00FF0000) >>> 16,
+                               (d & 0x0000FF00) >>> 8, d & 0x000000FF);
+  }
+
+  function createChunk(length, type, data) {
+    return dword(length) + type + data + dword(crc(type + data));
+  }
+
+  make_crc_table();
+  var IEND = createChunk(0, 'IEND', '');
+
+  function createIHDR(w, h) {
+    var d = dword(w) + dword(h);
+    d += String.fromCharCode(8, 6, 0, 0, 0); // 8-bit RGBA, no interlace
+    return createChunk(13, 'IHDR', d);
+  }
+
+  globalObj.generatePng = function(width, height, rgba) {
+    var IHDR = createIHDR(width, height), scanlines = '';
+    for (var y = 0; y < rgba.length; y += width * 4) {
+      scanlines += NO_FILTER;
+      if (Array.isArray(rgba)) {
+        for (var x = 0; x < width * 4; x++) {
+          scanlines += String.fromCharCode(rgba[y + x] & 0xff);
+        }
+      } else {
+        scanlines += rgba.substr(y, width * 4);
+      }
+    }
+    var compressed = DEFLATE_METHOD + inflateStore(scanlines) + dword(adler32(scanlines));
+    return SIGNATURE + IHDR + createChunk(compressed.length, 'IDAT', compressed) + IEND;
+  };
+}(window));
+
+function rawImageDataToString(dat) {
+  var s = '';
+  for (var i = 0; i < dat.length; i++) { s += String.fromCharCode(dat[i]); }
+  return s;
+}
+
+// --- SimpleImage wrapper for pixel access ---
+function SimpleImage(canvas) {
+  this.canvas = canvas;
+  this.context = canvas.getContext('2d');
+  this.width = canvas.width;
+  this.height = canvas.height;
+  this.imageData = this.context.getImageData(0, 0, this.width, this.height);
+  this.data = this.imageData.data;
+}
+SimpleImage.prototype.getRGB = function(x, y) {
+  var i = (y * this.width + x) * 4;
+  return { r: this.data[i], g: this.data[i+1], b: this.data[i+2], a: this.data[i+3] };
+};
+SimpleImage.prototype.setRGB = function(x, y, px) {
+  var i = (y * this.width + x) * 4;
+  this.data[i] = px.r; this.data[i+1] = px.g; this.data[i+2] = px.b;
+  this.data[i+3] = ('a' in px) ? px.a : 255;
+};
+SimpleImage.prototype.getRawData = function() { return this.data; };
+
+// --- Alpha bleed algorithm from https://github.com/urraka/alpha-bleeding ---
+function bleedAlpha(canvas) {
+  var simg = new SimpleImage(canvas);
+  var width = canvas.width, height = canvas.height;
+
+  var opaque = [], loose = [], pending = [], pendingNext = [];
+  for (var y = 0; y < height; y++) {
+    opaque[y] = [];
+    loose[y] = [];
+    for (var x = 0; x < width; x++) {
+      opaque[y][x] = 0;
+      loose[y][x] = false;
+    }
+  }
+
+  var offsets = [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+
+  for (var y = 0; y < height; y++) {
+    for (var x = 0; x < width; x++) {
+      var pixel = simg.getRGB(x, y);
+      if (pixel.a == 0) {
+        var isLoose = true;
+        for (var k = 0; k < 8; k++) {
+          var nX = x + offsets[k][0], nY = y + offsets[k][1];
+          if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
+            if (simg.getRGB(nX, nY).a != 0) { isLoose = false; break; }
+          }
+        }
+        if (!isLoose) { pending.push({x: x, y: y}); }
+        else { loose[y][x] = true; }
+      } else {
+        opaque[y][x] = -1;
+      }
+    }
+  }
+
+  while (pending.length > 0) {
+    pendingNext = [];
+    for (var p = 0; p < pending.length; p++) {
+      var coord = pending[p], x = coord.x, y = coord.y;
+      var r = 0, g = 0, b = 0, count = 0;
+      for (var k = 0; k < 8; k++) {
+        var nX = x + offsets[k][0], nY = y + offsets[k][1];
+        if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
+          if (opaque[nY][nX] & 1) {
+            var neighbor = simg.getRGB(nX, nY);
+            r += neighbor.r; g += neighbor.g; b += neighbor.b;
+            count++;
+          }
+        }
+      }
+      if (count > 0) {
+        simg.setRGB(x, y, {r: r/count, g: g/count, b: b/count, a: 0});
+        opaque[y][x] = 0xFE;
+        for (var k = 0; k < 8; k++) {
+          var nX = x + offsets[k][0], nY = y + offsets[k][1];
+          if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
+            if (loose[nY][nX]) { pendingNext.push({x: nX, y: nY}); loose[nY][nX] = false; }
+          }
+        }
+      } else {
+        pendingNext.push({x: x, y: y});
+      }
+    }
+    if (pendingNext.length > 0) {
+      for (var p = 0; p < pending.length; p++) {
+        var coord = pending[p];
+        opaque[coord.y][coord.x] >>= 1;
+      }
+    }
+    pending = pendingNext;
+  }
+
+  var dat = simg.getRawData();
+  return btoa(generatePng(width, height, rawImageDataToString(dat)));
+}
+
+// --- Main UI ---
+(function () {
+  var dropZone = document.getElementById('dropZone');
+  var fileInput = document.getElementById('fileInput');
+  var thumbnailsEl = document.getElementById('thumbnails');
+  var clearBtn = document.getElementById('clearBtn');
+  var processBtn = document.getElementById('processBtn');
+  var downloadBtn = document.getElementById('downloadBtn');
+  var progressContainer = document.getElementById('progressContainer');
+  var progressText = document.getElementById('progressText');
+  var progressPercent = document.getElementById('progressPercent');
+  var progressFill = document.getElementById('progressFill');
+  var previewSection = document.getElementById('previewSection');
+  var previewList = document.getElementById('previewList');
+
+  var images = []; // { name, img, w, h, fixedDataUrl, processed }
 
   // --- File handling ---
 
-  dropZone.addEventListener('dragover', (e) => {
+  dropZone.addEventListener('dragover', function(e) {
     e.preventDefault();
     dropZone.classList.add('dragover');
   });
 
-  dropZone.addEventListener('dragleave', () => {
+  dropZone.addEventListener('dragleave', function() {
     dropZone.classList.remove('dragover');
   });
 
-  dropZone.addEventListener('drop', (e) => {
+  dropZone.addEventListener('drop', function(e) {
     e.preventDefault();
     dropZone.classList.remove('dragover');
     handleFiles(e.dataTransfer.files);
   });
 
-  fileInput.addEventListener('change', (e) => {
+  fileInput.addEventListener('change', function(e) {
     handleFiles(e.target.files);
     fileInput.value = '';
   });
 
   function handleFiles(fileList) {
-    const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+    var files = Array.from(fileList).filter(function(f) { return f.type.startsWith('image/'); });
     if (!files.length) return;
 
-    const promises = files.map(file => {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const img = new Image();
-          img.onload = () => {
+    var promises = files.map(function(file) {
+      return new Promise(function(resolve) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+          var img = new Image();
+          img.onload = function() {
             resolve({
               name: file.name.replace(/\.[^.]+$/, ''),
-              ext: file.name.split('.').pop(),
-              img,
+              img: img,
               w: img.naturalWidth,
               h: img.naturalHeight,
-              fixedCanvas: null,
+              fixedDataUrl: null,
               processed: false
             });
           };
@@ -483,8 +666,8 @@
       });
     });
 
-    Promise.all(promises).then(newImages => {
-      images.push(...newImages);
+    Promise.all(promises).then(function(newImages) {
+      images = images.concat(newImages);
       downloadBtn.disabled = true;
       updateUI();
     });
@@ -505,28 +688,28 @@
 
   function renderThumbnails() {
     thumbnailsEl.innerHTML = '';
-    images.forEach((item, i) => {
-      const div = document.createElement('div');
+    images.forEach(function(item, i) {
+      var div = document.createElement('div');
       div.className = 'thumb';
       div.title = item.name + ' (' + item.w + '\u00d7' + item.h + ')';
 
-      const img = document.createElement('img');
+      var img = document.createElement('img');
       img.src = item.img.src;
       div.appendChild(img);
 
-      const btn = document.createElement('button');
+      var btn = document.createElement('button');
       btn.className = 'remove';
       btn.textContent = '\u00d7';
-      btn.onclick = () => {
-        images.splice(i, 1);
+      btn.onclick = (function(idx) { return function() {
+        images.splice(idx, 1);
         downloadBtn.disabled = true;
         updateUI();
         renderPreviews();
-      };
+      }; })(i);
       div.appendChild(btn);
 
       if (item.processed) {
-        const badge = document.createElement('span');
+        var badge = document.createElement('span');
         badge.className = 'status-badge done';
         badge.textContent = 'Fixed';
         div.appendChild(badge);
@@ -536,120 +719,6 @@
     });
   }
 
-  // --- Alpha bleed algorithm ---
-  // Based on https://github.com/urraka/alpha-bleeding
-  // BFS flood-fill that propagates RGB from opaque pixels into ALL transparent pixels.
-  // Uses bit-masking on an opaque tracking array to correctly handle wavefront expansion.
-
-  function alphaBleed(data, width, height) {
-    const offsets = [
-      [-1, -1], [0, -1], [1, -1],
-      [-1,  0],          [1,  0],
-      [-1,  1], [0,  1], [1,  1],
-    ];
-
-    // opaque: -1 (0xFFFFFFFF) = original opaque pixel, 0 = unprocessed transparent
-    // loose: true = transparent pixel with NO opaque neighbors yet
-    const opaque = new Int32Array(width * height);
-    const loose = new Uint8Array(width * height);
-    let pending = [];
-    let pendingNext = [];
-
-    // Classify all pixels
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        const si = idx * 4;
-
-        if (data[si + 3] !== 0) {
-          // Opaque (or semi-transparent) — mark as source
-          opaque[idx] = -1; // all bits set
-        } else {
-          // Fully transparent — check if adjacent to any non-transparent pixel
-          let isLoose = true;
-          for (let k = 0; k < 8; k++) {
-            const nX = x + offsets[k][0];
-            const nY = y + offsets[k][1];
-            if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
-              if (data[(nY * width + nX) * 4 + 3] !== 0) {
-                isLoose = false;
-                break;
-              }
-            }
-          }
-
-          if (!isLoose) {
-            pending.push(idx);
-          } else {
-            loose[idx] = 1;
-          }
-        }
-      }
-    }
-
-    // Iteratively expand: process pending pixels, then shift bits
-    while (pending.length > 0) {
-      pendingNext = [];
-
-      for (let p = 0; p < pending.length; p++) {
-        const idx = pending[p];
-        const x = idx % width;
-        const y = (idx - x) / width;
-
-        let r = 0, g = 0, b = 0, count = 0;
-
-        for (let k = 0; k < 8; k++) {
-          const nX = x + offsets[k][0];
-          const nY = y + offsets[k][1];
-          if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
-            const nIdx = nY * width + nX;
-            // Check lowest bit — means this neighbor has valid RGB
-            if (opaque[nIdx] & 1) {
-              const nSi = nIdx * 4;
-              r += data[nSi];
-              g += data[nSi + 1];
-              b += data[nSi + 2];
-              count++;
-            }
-          }
-        }
-
-        if (count > 0) {
-          const si = idx * 4;
-          data[si]     = Math.round(r / count);
-          data[si + 1] = Math.round(g / count);
-          data[si + 2] = Math.round(b / count);
-          // Keep alpha at 0
-          opaque[idx] = 0xFE;
-
-          // Promote loose neighbors to pending
-          for (let k = 0; k < 8; k++) {
-            const nX = x + offsets[k][0];
-            const nY = y + offsets[k][1];
-            if (nX >= 0 && nX < width && nY >= 0 && nY < height) {
-              const nIdx = nY * width + nX;
-              if (loose[nIdx]) {
-                pendingNext.push(nIdx);
-                loose[nIdx] = 0;
-              }
-            }
-          }
-        } else {
-          pendingNext.push(idx);
-        }
-      }
-
-      // Shift right so newly filled pixels (0xFE >> 1 = 0x7F) still have bit 0 set
-      if (pendingNext.length > 0) {
-        for (let p = 0; p < pending.length; p++) {
-          opaque[pending[p]] >>= 1;
-        }
-      }
-
-      pending = pendingNext;
-    }
-  }
-
   // --- Processing ---
 
   async function processImages() {
@@ -657,27 +726,26 @@
     downloadBtn.disabled = true;
     progressContainer.classList.add('visible');
 
-    for (let idx = 0; idx < images.length; idx++) {
-      const item = images[idx];
-      const pct = Math.round(((idx) / images.length) * 100);
+    for (var idx = 0; idx < images.length; idx++) {
+      var item = images[idx];
+      var pct = Math.round((idx / images.length) * 100);
       progressText.textContent = 'Processing ' + (idx + 1) + ' of ' + images.length + '...';
       progressPercent.textContent = pct + '%';
       progressFill.style.width = pct + '%';
 
       // Yield to UI
-      await new Promise(r => setTimeout(r, 0));
+      await new Promise(function(r) { setTimeout(r, 0); });
 
-      const canvas = document.createElement('canvas');
+      // Draw original image to a temp canvas
+      var canvas = document.createElement('canvas');
       canvas.width = item.w;
       canvas.height = item.h;
-      const ctx = canvas.getContext('2d');
+      var ctx = canvas.getContext('2d');
       ctx.drawImage(item.img, 0, 0);
 
-      const imageData = ctx.getImageData(0, 0, item.w, item.h);
-      alphaBleed(imageData.data, item.w, item.h);
-      ctx.putImageData(imageData, 0, 0);
-
-      item.fixedCanvas = canvas;
+      // Run the bleed algorithm — returns base64 PNG encoded directly from raw pixels
+      var resultBase64 = bleedAlpha(canvas);
+      item.fixedDataUrl = 'data:image/png;base64,' + resultBase64;
       item.processed = true;
 
       renderThumbnails();
@@ -687,7 +755,7 @@
     progressPercent.textContent = '100%';
     progressFill.style.width = '100%';
 
-    setTimeout(() => {
+    setTimeout(function() {
       progressContainer.classList.remove('visible');
     }, 1500);
 
@@ -698,7 +766,7 @@
   }
 
   function renderPreviews() {
-    const processed = images.filter(item => item.processed);
+    var processed = images.filter(function(item) { return item.processed; });
     if (processed.length === 0) {
       previewSection.style.display = 'none';
       return;
@@ -707,42 +775,38 @@
     previewSection.style.display = 'block';
     previewList.innerHTML = '';
 
-    processed.forEach(item => {
-      const grid = document.createElement('div');
+    processed.forEach(function(item) {
+      var grid = document.createElement('div');
       grid.className = 'preview-grid';
       grid.style.marginBottom = '1.5rem';
 
       // Before card
-      const beforeCard = document.createElement('div');
+      var beforeCard = document.createElement('div');
       beforeCard.className = 'preview-card';
-      const beforeHeader = document.createElement('div');
+      var beforeHeader = document.createElement('div');
       beforeHeader.className = 'preview-card-header';
       beforeHeader.innerHTML = '<span class="filename">Before &mdash; ' + item.name + '</span><span class="dimensions">' + item.w + '\u00d7' + item.h + '</span>';
-      const beforeBody = document.createElement('div');
+      var beforeBody = document.createElement('div');
       beforeBody.className = 'preview-card-body';
-      const beforeCanvas = document.createElement('canvas');
-      beforeCanvas.width = item.w;
-      beforeCanvas.height = item.h;
-      const beforeCtx = beforeCanvas.getContext('2d');
-      beforeCtx.drawImage(item.img, 0, 0);
-      beforeBody.appendChild(beforeCanvas);
+      var beforeImg = document.createElement('img');
+      beforeImg.src = item.img.src;
+      beforeImg.style.maxWidth = '100%';
+      beforeBody.appendChild(beforeImg);
       beforeCard.appendChild(beforeHeader);
       beforeCard.appendChild(beforeBody);
 
       // After card
-      const afterCard = document.createElement('div');
+      var afterCard = document.createElement('div');
       afterCard.className = 'preview-card';
-      const afterHeader = document.createElement('div');
+      var afterHeader = document.createElement('div');
       afterHeader.className = 'preview-card-header';
       afterHeader.innerHTML = '<span class="filename">After &mdash; ' + item.name + '</span><span class="dimensions">' + item.w + '\u00d7' + item.h + '</span>';
-      const afterBody = document.createElement('div');
+      var afterBody = document.createElement('div');
       afterBody.className = 'preview-card-body';
-      const afterCanvas = document.createElement('canvas');
-      afterCanvas.width = item.w;
-      afterCanvas.height = item.h;
-      const afterCtx = afterCanvas.getContext('2d');
-      afterCtx.drawImage(item.fixedCanvas, 0, 0);
-      afterBody.appendChild(afterCanvas);
+      var afterImg = document.createElement('img');
+      afterImg.src = item.fixedDataUrl;
+      afterImg.style.maxWidth = '100%';
+      afterBody.appendChild(afterImg);
       afterCard.appendChild(afterHeader);
       afterCard.appendChild(afterBody);
 
@@ -754,35 +818,36 @@
 
   // --- Download ---
 
-  function downloadAll() {
-    const format = outputFormatSelect.value;
-    const mime = format === 'webp' ? 'image/webp' : 'image/png';
-    const ext = format === 'webp' ? '.webp' : '.png';
+  function dataUrlToBlob(dataUrl) {
+    var parts = dataUrl.split(',');
+    var mime = parts[0].match(/:(.*?);/)[1];
+    var raw = atob(parts[1]);
+    var arr = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return new Blob([arr], { type: mime });
+  }
 
-    const processed = images.filter(item => item.processed);
+  function downloadAll() {
+    var processed = images.filter(function(item) { return item.processed; });
     if (processed.length === 0) return;
 
     if (processed.length === 1) {
-      // Single file: download directly
-      processed[0].fixedCanvas.toBlob((blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = processed[0].name + '_fixed' + ext;
-        a.click();
-        URL.revokeObjectURL(url);
-      }, mime);
+      var blob = dataUrlToBlob(processed[0].fixedDataUrl);
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = processed[0].name + '_fixed.png';
+      a.click();
+      URL.revokeObjectURL(url);
     } else {
-      // Multiple files: download as zip using JSZip-like inline approach
-      downloadAsZip(processed, mime, ext);
+      downloadAsZip(processed);
     }
   }
 
-  async function downloadAsZip(items, mime, ext) {
-    // Dynamically load JSZip if not already present
+  async function downloadAsZip(items) {
     if (typeof JSZip === 'undefined') {
-      await new Promise((resolve, reject) => {
-        const script = document.createElement('script');
+      await new Promise(function(resolve, reject) {
+        var script = document.createElement('script');
         script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
         script.onload = resolve;
         script.onerror = reject;
@@ -790,34 +855,33 @@
       });
     }
 
-    const zip = new JSZip();
-
-    for (const item of items) {
-      const blob = await new Promise(r => item.fixedCanvas.toBlob(r, mime));
-      zip.file(item.name + '_fixed' + ext, blob);
+    var zip = new JSZip();
+    for (var i = 0; i < items.length; i++) {
+      var blob = dataUrlToBlob(items[i].fixedDataUrl);
+      zip.file(items[i].name + '_fixed.png', blob);
     }
 
-    const content = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(content);
-    const a = document.createElement('a');
+    var content = await zip.generateAsync({ type: 'blob' });
+    var url = URL.createObjectURL(content);
+    var a = document.createElement('a');
     a.href = url;
-    a.download = 'alpha_bleed_fixed' + '.zip';
+    a.download = 'alpha_bleed_fixed.zip';
     a.click();
     URL.revokeObjectURL(url);
   }
 
   // --- Controls ---
 
-  clearBtn.addEventListener('click', () => {
+  clearBtn.addEventListener('click', function() {
     images = [];
     updateUI();
   });
 
-  processBtn.addEventListener('click', () => {
+  processBtn.addEventListener('click', function() {
     processImages();
   });
 
-  downloadBtn.addEventListener('click', () => {
+  downloadBtn.addEventListener('click', function() {
     downloadAll();
   });
 })();
