@@ -332,14 +332,7 @@
       padding: 1rem;
     }
 
-    .preview-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-    }
-
     @media (max-width: 700px) {
-      .preview-grid { grid-template-columns: 1fr; }
       .settings-field input { width: 100%; }
     }
 
@@ -358,11 +351,7 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-    }
-
-    .preview-card-header .filename {
-      color: #ccc;
-      font-weight: 500;
+      gap: .75rem;
     }
 
     .preview-card-header .dimensions {
@@ -371,27 +360,55 @@
       font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
     }
 
+    /* Before / after toggle */
+    .ba-toggle {
+      display: flex;
+      background: #222;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #333;
+    }
+
+    .ba-toggle button {
+      padding: .4rem 1rem;
+      border: none;
+      background: transparent;
+      color: #888;
+      font-size: .82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+
+    .ba-toggle button.active {
+      background: #4a9eff;
+      color: #fff;
+    }
+
+    .ba-toggle button:hover:not(.active):not(:disabled) {
+      color: #e0e0e0;
+    }
+
+    .ba-toggle button:disabled {
+      opacity: .4;
+      cursor: not-allowed;
+    }
+
     .preview-card-body {
       background: repeating-conic-gradient(#222 0% 25%, #2a2a2a 0% 50%) 50% / 20px 20px;
-      padding: 1rem;
+      padding: 1.5rem;
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 160px;
+      min-height: 320px;
     }
 
     .preview-card-body canvas,
     .preview-card-body img {
       max-width: 100%;
-      max-height: 360px;
+      max-height: 560px;
       height: auto;
       display: block;
-    }
-
-    .after-placeholder {
-      color: #555;
-      font-size: .85rem;
-      text-align: center;
     }
 
     .card-footer {
@@ -506,27 +523,19 @@
       </div>
     </div>
 
-    <!-- Before / after preview -->
+    <!-- Single enlarged preview with before / after toggle -->
     <div class="workspace">
-      <div class="preview-grid">
-        <div class="preview-card">
-          <div class="preview-card-header">
-            <span class="filename">Before</span>
-            <span class="dimensions before-dims"></span>
+      <div class="preview-card">
+        <div class="preview-card-header">
+          <div class="ba-toggle">
+            <button type="button" class="ba-before active">Before</button>
+            <button type="button" class="ba-after" disabled>After</button>
           </div>
-          <div class="preview-card-body">
-            <img class="before-img" alt="Original">
-          </div>
+          <span class="dimensions preview-dims"></span>
         </div>
-        <div class="preview-card">
-          <div class="preview-card-header">
-            <span class="filename">After</span>
-            <span class="dimensions after-dims"></span>
-          </div>
-          <div class="preview-card-body">
-            <canvas class="after-canvas hidden"></canvas>
-            <div class="after-placeholder">Click &ldquo;Fix Images&rdquo; to preview</div>
-          </div>
+        <div class="preview-card-body">
+          <img class="before-img" alt="Original">
+          <canvas class="after-canvas hidden"></canvas>
         </div>
       </div>
     </div>
@@ -896,6 +905,7 @@ function resizeStraight(src, sw, sh, dw, dh) {
       outH: h,
       bled: null,
       processed: false,
+      viewMode: 'before',
       dom: null
     };
   }
@@ -916,12 +926,12 @@ function resizeStraight(src, sw, sh, dw, dh) {
       lockBtn: $('.lock-btn'),
       resetSizeBtn: $('.reset-size-btn'),
       outDims: $('.out-dims'),
+      baBefore: $('.ba-before'),
+      baAfter: $('.ba-after'),
+      previewDims: $('.preview-dims'),
       beforeImg: $('.before-img'),
-      beforeDims: $('.before-dims'),
       afterCanvas: $('.after-canvas'),
       afterCtx: null,
-      afterDims: $('.after-dims'),
-      afterPlaceholder: $('.after-placeholder'),
       downloadBtn: $('.download-this')
     };
     dom.afterCtx = dom.afterCanvas.getContext('2d');
@@ -934,13 +944,13 @@ function resizeStraight(src, sw, sh, dw, dh) {
     setLockUI(image);
 
     dom.beforeImg.src = image.img.src;
-    dom.beforeDims.textContent = image.w + '×' + image.h;
 
     addInfoPill(dom.info, 'Original', image.w + ' × ' + image.h);
     updateOutDims(image);
 
     wireCard(image);
     cardList.appendChild(card);
+    setView(image, 'before');
   }
 
   function addInfoPill(container, label, value) {
@@ -1001,9 +1011,27 @@ function resizeStraight(src, sw, sh, dw, dh) {
       onSizeChanged(image);
     });
 
+    d.baBefore.addEventListener('click', function () { setView(image, 'before'); });
+    d.baAfter.addEventListener('click', function () { setView(image, 'after'); });
+
     d.downloadBtn.addEventListener('click', function () {
       downloadOne(image);
     });
+  }
+
+  // --- Before / after view toggle ---
+
+  function setView(image, mode) {
+    var d = image.dom;
+    if (mode === 'after' && !image.processed) mode = 'before';
+    image.viewMode = mode;
+    d.baBefore.classList.toggle('active', mode === 'before');
+    d.baAfter.classList.toggle('active', mode === 'after');
+    d.beforeImg.classList.toggle('hidden', mode !== 'before');
+    d.afterCanvas.classList.toggle('hidden', mode !== 'after');
+    d.previewDims.textContent = mode === 'after'
+      ? (image.outW + '×' + image.outH)
+      : (image.w + '×' + image.h);
   }
 
   function setLockUI(image) {
@@ -1076,6 +1104,7 @@ function resizeStraight(src, sw, sh, dw, dh) {
       image.bled = computeBled(canvas);
       image.processed = true;
       renderAfter(image);
+      setView(image, 'after'); // auto-show the fixed result
     }
 
     progressFill.style.width = '100%';
@@ -1092,10 +1121,9 @@ function resizeStraight(src, sw, sh, dw, dh) {
     d.afterCanvas.width = image.outW;
     d.afterCanvas.height = image.outH;
     d.afterCtx.putImageData(new ImageData(out, image.outW, image.outH), 0, 0);
-    d.afterDims.textContent = image.outW + '×' + image.outH;
-    d.afterCanvas.classList.remove('hidden');
-    d.afterPlaceholder.classList.add('hidden');
+    d.baAfter.disabled = false;
     d.downloadBtn.disabled = false;
+    if (image.viewMode === 'after') setView(image, 'after'); // refresh dims label
   }
 
   // --- Output encoding (bled + resize, alpha preserved) ---

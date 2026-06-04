@@ -13,7 +13,7 @@ Alpha bleeding fills the RGB values of transparent pixels with colors from their
 ## Features
 
 - Upload one or multiple images (PNG, WebP)
-- Per-image card with its own controls and side-by-side before/after preview
+- Per-image card with its own controls and a single enlarged preview that toggles between before/after
 - Rename each output file
 - Resize the output (with optional aspect-ratio lock) — done in straight-alpha space so the bled RGB is preserved at any size
 - Download fixed images individually or all at once as a ZIP
@@ -24,5 +24,5 @@ Alpha bleeding fills the RGB values of transparent pixels with colors from their
 1. Drop or select your transparent images
 2. For each image, optionally rename it and set the output width/height
 3. Click **Fix Images**
-4. Preview the before/after result on each card
+4. Use the Before/After toggle on each card to compare the result on a single enlarged image
 5. Click **Download** on a card, or **Download All** for a ZIP
